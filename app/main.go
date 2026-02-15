@@ -26,28 +26,33 @@ func main() {
 		fmt.Println("Failed to bind to port 6379")
 		os.Exit(1)
 	}
-	conn, err := l.Accept()
-	if err != nil {
-		fmt.Println("Error accepting connection: ", err.Error())
-		os.Exit(1)
-	}
-	scanner := bufio.NewScanner(conn)
-	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-		if atEOF && len(data) == 0 {
-			return 0, nil, nil
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection: ", err.Error())
+			os.Exit(1)
 		}
-		if i := bytes.Index(data, []byte("\r\n")); i >= 0 {
-			return i + 2, data[:i], nil
-		}
-		if atEOF {
-			return len(data), data, nil
-		}
-		return 0, nil, nil
-	})
+		go func(conn net.Conn) {
+			scanner := bufio.NewScanner(conn)
+			scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+				if atEOF && len(data) == 0 {
+					return 0, nil, nil
+				}
+				if i := bytes.Index(data, []byte("\r\n")); i >= 0 {
+					return i + 2, data[:i], nil
+				}
+				if atEOF {
+					return len(data), data, nil
+				}
+				return 0, nil, nil
+			})
 
-	for scanner.Scan() {
-		if strings.Compare(scanner.Text(), "PING") == 0 {
-			conn.Write([]byte("+PONG\r\n"))
-		}
+			for scanner.Scan() {
+				if strings.Compare(scanner.Text(), "PING") == 0 {
+					conn.Write([]byte("+PONG\r\n"))
+				}
+			}
+		}(conn)
+
 	}
 }

@@ -167,6 +167,38 @@ func (c *Command) Rpush() Response {
 	return c.GenerateNumResponse(int64(length))
 }
 
+func (c *Command) Lrange() Response {
+	if len(c.Array) != 4 {
+		return c.GenErrResponse("invalid arg num for lrange")
+	}
+	left, err := strconv.Atoi(string(c.Array[2].Bulk))
+	if err != nil {
+		return c.GenErrResponse("invalid left for lrange")
+	}
+	right, err := strconv.Atoi(string(c.Array[3].Bulk))
+	if err != nil {
+		return c.GenErrResponse("invalid right for lrange")
+	}
+	res := Response{}
+	res.Type = '*'
+	res.Array = RedisArray{}
+	listMemMu.RLock()
+	list := listMem[string(c.Array[1].Bulk)]
+	length := len(list)
+	if right >= length {
+		right = length - 1
+	}
+	for left <= right {
+		tmp := RedisValue{}
+		tmp.Type = '$'
+		tmp.Bulk = []byte(list[left])
+		res.Array = append(res.Array, tmp)
+		left++
+	}
+	listMemMu.RUnlock()
+	return res
+}
+
 func (c *Command) Process() Response {
 	if c.Type != '*' {
 		return c.GenErrResponse("request must be arr")
@@ -191,6 +223,8 @@ func (c *Command) Process() Response {
 		return c.Get()
 	case "rpush":
 		return c.Rpush()
+	case "lrange":
+		return c.Lrange()
 	default:
 		return c.GenErrResponse("unknown command")
 	}

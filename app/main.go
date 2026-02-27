@@ -15,10 +15,12 @@ import (
 
 // Ensures gofmt doesn't remove the "net" and "os" imports in stage 1 (feel free to remove this!)
 var (
-	_     = net.Listen
-	_     = os.Exit
-	mem   = map[string]RedisMemValue{}
-	memMu sync.RWMutex
+	_         = net.Listen
+	_         = os.Exit
+	mem       = map[string]RedisMemValue{}
+	memMu     sync.RWMutex
+	listMem   = map[string][]string{}
+	listMemMu sync.RWMutex
 )
 
 type RedisMemValue struct {
@@ -40,6 +42,7 @@ type (
 	Command      RedisValue
 	Response     RedisValue
 	RedisErr     string
+	RedisInt     int64
 )
 
 func IsBulkStr(t byte) bool {
@@ -50,7 +53,7 @@ type RedisValue struct {
 	// 记录是 '+' ':' '$' '*' '-'
 	Type    byte
 	SimpStr SimpleString
-	Num     int64
+	Num     RedisInt
 	Bulk    BulkString
 	Array   RedisArray
 	Err     RedisErr
@@ -141,6 +144,28 @@ func (c *Command) Get() Response {
 	return res
 }
 
+func (c *Command) GenerateNumResponse(num int64) Response {
+	return Response{Type: ':', Num: RedisInt(num)}
+}
+
+func (c *Command) Rpush() Response {
+	if len(c.Array) < 3 {
+		return c.GenErrResponse("invalid arg num for lpush")
+	}
+	listMemMu.Lock()
+	list := listMem[string(c.Array[1].Bulk)]
+	for i := 2; i < len(c.Array); i++ {
+		if !IsBulkStr(c.Array[i].Type) {
+			listMemMu.Unlock()
+			return c.GenErrResponse("arg type invalid")
+		}
+		list = append(list, string(c.Array[i].Bulk))
+	}
+	length := len(list)
+	listMemMu.Unlock()
+	return c.GenerateNumResponse(int64(length))
+}
+
 func (c *Command) Process() Response {
 	if c.Type != '*' {
 		return c.GenErrResponse("request must be arr")
@@ -163,6 +188,8 @@ func (c *Command) Process() Response {
 		return c.Set()
 	case "get":
 		return c.Get()
+	case "rpush":
+		return c.Rpush()
 	default:
 		return c.GenErrResponse("unknown command")
 	}
@@ -179,6 +206,17 @@ func (b BulkString) WriteTo(w *bufio.Writer) error {
 	w.WriteString("\r\n")
 	w.Write(b)
 	_, err = w.WriteString("\r\n")
+	return err
+}
+
+func (b RedisInt) WriteTo(w *bufio.Writer) error {
+	w.WriteByte(':')
+	if b < 0 {
+		w.WriteByte('-')
+	}
+
+	w.WriteString(strconv.FormatInt(int64(b), 10))
+	_, err := w.WriteString("\r\n")
 	return err
 }
 
@@ -227,6 +265,8 @@ func (v RedisValue) WriteTo(w *bufio.Writer) error {
 		return v.Array.WriteTo(w)
 	case '$':
 		return v.Bulk.WriteTo(w)
+	case ':':
+		return v.Num.WriteTo(w)
 	default:
 		return nil
 	}

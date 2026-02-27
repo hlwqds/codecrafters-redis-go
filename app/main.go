@@ -190,8 +190,8 @@ func (c *Command) Lpop() Response {
 		}
 		popNum = num
 	}
-	if popNum > len(c.Array) {
-		popNum = len(c.Array)
+	if popNum > len(list) {
+		popNum = len(list)
 	}
 	listMem[string(c.Array[1].Bulk)] = list[popNum:]
 	listMemMu.Unlock()
@@ -207,7 +207,6 @@ func (c *Command) Lpop() Response {
 		tmp := RedisValue{}
 		tmp.Type = '$'
 		tmp.Bulk = []byte(list[i])
-		fmt.Println(tmp.Bulk)
 		res.Array = append(res.Array, tmp)
 	}
 	return res

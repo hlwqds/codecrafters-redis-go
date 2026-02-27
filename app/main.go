@@ -148,7 +148,7 @@ func (c *Command) GenerateNumResponse(num int64) Response {
 	return Response{Type: ':', Num: RedisInt(num)}
 }
 
-func (c *Command) Rpush() Response {
+func (c *Command) Push(right bool) Response {
 	if len(c.Array) < 3 {
 		return c.GenErrResponse("invalid arg num for lpush")
 	}
@@ -159,7 +159,11 @@ func (c *Command) Rpush() Response {
 			listMemMu.Unlock()
 			return c.GenErrResponse("arg type invalid")
 		}
-		list = append(list, string(c.Array[i].Bulk))
+		if right {
+			list = append(list, string(c.Array[i].Bulk))
+		} else {
+			list = append([]string{string(c.Array[i].Bulk)}, list...)
+		}
 	}
 	listMem[string(c.Array[1].Bulk)] = list
 	length := len(list)
@@ -235,7 +239,9 @@ func (c *Command) Process() Response {
 	case "get":
 		return c.Get()
 	case "rpush":
-		return c.Rpush()
+		return c.Push(true)
+	case "lpush":
+		return c.Push(false)
 	case "lrange":
 		return c.Lrange()
 	default:

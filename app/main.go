@@ -172,7 +172,8 @@ func (c *Command) Push(right bool) Response {
 }
 
 func (c *Command) Lpop() Response {
-	if len(c.Array) != 2 {
+	popNum := 1
+	if len(c.Array) != 2 && len(c.Array) != 3 {
 		return c.GenErrResponse("invalid arg num for lpop")
 	}
 	listMemMu.Lock()
@@ -181,9 +182,34 @@ func (c *Command) Lpop() Response {
 		listMemMu.Unlock()
 		return Response{Type: '$', Bulk: nil}
 	}
-	listMem[string(c.Array[1].Bulk)] = list[1:]
+	if len(c.Array) == 3 {
+		num, err := strconv.Atoi(string(c.Array[2].Bulk))
+		if err != nil || num <= 0 {
+			listMemMu.Unlock()
+			return c.GenErrResponse("lpop just support num > 0")
+		}
+		popNum = num
+	}
+	if popNum > len(c.Array) {
+		popNum = len(c.Array)
+	}
+	listMem[string(c.Array[1].Bulk)] = list[popNum:]
 	listMemMu.Unlock()
-	return Response{Type: '$', Bulk: []byte(list[0])}
+
+	if popNum == 1 {
+		return Response{Type: '$', Bulk: []byte(list[0])}
+	}
+	res := Response{}
+	res.Type = '*'
+	res.Array = RedisArray{}
+
+	for i := range popNum {
+		tmp := RedisValue{}
+		tmp.Type = '$'
+		tmp.Bulk = []byte(list[i])
+		res.Array = append(res.Array, tmp)
+	}
+	return res
 }
 
 func (c *Command) Llen() Response {

@@ -171,6 +171,21 @@ func (c *Command) Push(right bool) Response {
 	return c.GenerateNumResponse(int64(length))
 }
 
+func (c *Command) Lpop() Response {
+	if len(c.Array) != 2 {
+		return c.GenErrResponse("invalid arg num for lpop")
+	}
+	listMemMu.Lock()
+	list := listMem[string(c.Array[1].Bulk)]
+	if len(list) == 0 {
+		listMemMu.Unlock()
+		return Response{Type: '$', Bulk: nil}
+	}
+	listMem[string(c.Array[1].Bulk)] = list[1:]
+	listMemMu.Unlock()
+	return Response{Type: '$', Bulk: []byte(list[0])}
+}
+
 func (c *Command) Llen() Response {
 	if len(c.Array) != 2 {
 		return c.GenErrResponse("invalid arg num for llen")
@@ -257,6 +272,8 @@ func (c *Command) Process() Response {
 		return c.Lrange()
 	case "llen":
 		return c.Llen()
+	case "lpop":
+		return c.Lpop()
 	default:
 		return c.GenErrResponse("unknown command")
 	}

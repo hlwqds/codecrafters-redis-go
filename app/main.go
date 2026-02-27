@@ -161,6 +161,7 @@ func (c *Command) Rpush() Response {
 		}
 		list = append(list, string(c.Array[i].Bulk))
 	}
+	listMem[string(c.Array[1].Bulk)] = list
 	length := len(list)
 	listMemMu.Unlock()
 	return c.GenerateNumResponse(int64(length))

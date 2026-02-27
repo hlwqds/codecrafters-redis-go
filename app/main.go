@@ -171,6 +171,17 @@ func (c *Command) Push(right bool) Response {
 	return c.GenerateNumResponse(int64(length))
 }
 
+func (c *Command) Llen() Response {
+	if len(c.Array) != 2 {
+		return c.GenErrResponse("invalid arg num for llen")
+	}
+	listMemMu.RLock()
+	list := listMem[string(c.Array[1].Bulk)]
+	length := len(list)
+	listMemMu.RUnlock()
+	return c.GenerateNumResponse(int64(length))
+}
+
 func (c *Command) Lrange() Response {
 	if len(c.Array) != 4 {
 		return c.GenErrResponse("invalid arg num for lrange")
@@ -244,6 +255,8 @@ func (c *Command) Process() Response {
 		return c.Push(false)
 	case "lrange":
 		return c.Lrange()
+	case "llen":
+		return c.Llen()
 	default:
 		return c.GenErrResponse("unknown command")
 	}

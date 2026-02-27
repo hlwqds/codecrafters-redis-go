@@ -185,6 +185,19 @@ func (c *Command) Lrange() Response {
 	listMemMu.RLock()
 	list := listMem[string(c.Array[1].Bulk)]
 	length := len(list)
+	if left < -length {
+		left = 0
+	}
+	if right < -length {
+		right = 0
+	}
+	if left < 0 {
+		left += length
+	}
+	if right < 0 {
+		right += length
+	}
+
 	if right >= length {
 		right = length - 1
 	}

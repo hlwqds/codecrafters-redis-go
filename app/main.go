@@ -13,8 +13,9 @@ import (
 
 // Ensures gofmt doesn't remove the "net" and "os" imports in stage 1 (feel free to remove this!)
 var (
-	_ = net.Listen
-	_ = os.Exit
+	_   = net.Listen
+	_   = os.Exit
+	mem = map[string]string{}
 )
 
 const (
@@ -32,6 +33,10 @@ type (
 	Response     RedisValue
 	RedisErr     string
 )
+
+func IsBulkStr(t byte) bool {
+	return t == '$'
+}
 
 type RedisValue struct {
 	// 记录是 '+' ':' '$' '*' '-'
@@ -66,11 +71,33 @@ func (c *Command) Process() Response {
 		res.Type = '+'
 		res.SimpStr = "PONG"
 	case "echo":
-		if len(c.Array) > 2 {
+		if len(c.Array) != 2 {
 			res.Type = '-'
-			res.Err = "too many arg for echo"
+			res.Err = "invalid arg num for echo"
 		} else {
 			res = Response(c.Array[1])
+		}
+	case "set":
+		if len(c.Array) != 3 || (!IsBulkStr(c.Array[1].Type) || !IsBulkStr(c.Array[2].Type)) {
+			res.Type = '-'
+			res.Err = "invalid arg num for set"
+		} else {
+			mem[string(c.Array[1].Bulk)] = string(c.Array[2].Bulk)
+			res.Type = '+'
+			res.SimpStr = "OK"
+		}
+	case "get":
+		if len(c.Array) != 2 || !IsBulkStr(c.Array[1].Type) {
+			res.Type = '-'
+			res.Err = "invalid arg num for get"
+		} else {
+			v, exists := mem[string(c.Array[1].Bulk)]
+			res.Type = '$'
+			if !exists {
+				res.Bulk = BulkString(NilBulkStr)
+			} else {
+				res.Bulk = BulkString(v)
+			}
 		}
 	default:
 		res.Type = '-'

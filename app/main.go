@@ -9,14 +9,24 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/tools/go/analysis/passes/defers"
 )
 
 // Ensures gofmt doesn't remove the "net" and "os" imports in stage 1 (feel free to remove this!)
 var (
-	_   = net.Listen
-	_   = os.Exit
-	mem = map[string]string{}
+	_     = net.Listen
+	_     = os.Exit
+	mem   = map[string]RedisMemValue{}
+	memMu sync.RWMutex
 )
+
+type RedisMemValue struct {
+	value    string
+	expireAt time.Time
+}
 
 const (
 	MaxBulkSize     = 512 * 1024 * 1024
@@ -48,12 +58,94 @@ type RedisValue struct {
 	Err     RedisErr
 }
 
+func (c *Command) GenErrResponse(msg string) Response {
+	return Response{Type: '-', Err: RedisErr(msg)}
+}
+
+func (c *Command) GenOkResponse() Response {
+	return Response{Type: '+', SimpStr: "OK"}
+}
+
+func (c *Command) Ping() Response {
+	return Response{Type: '+', SimpStr: "PONG"}
+}
+
+func (c *Command) Echo() Response {
+	if len(c.Array) != 2 {
+		return c.GenErrResponse("invalid arg num for echo")
+	}
+	return Response(c.Array[1])
+}
+
+func (c *Command) Set() Response {
+	now := time.Now()
+	if len(c.Array) != 3 && len(c.Array) != 5 {
+		return c.GenErrResponse("invalid arg num for set")
+	}
+
+	if !IsBulkStr(c.Array[1].Type) {
+		return c.GenErrResponse("invalid arg type for set")
+	}
+	key := c.Array[1].Bulk
+
+	if !IsBulkStr(c.Array[2].Type) {
+		return c.GenErrResponse("invalid arg type for set")
+	}
+	value := c.Array[2].Bulk
+	if len(c.Array) == 3 {
+		memMu.Lock()
+		mem[string(key)] = RedisMemValue{value: string(value)}
+		memMu.Unlock()
+		return c.GenOkResponse()
+	}
+
+	if !IsBulkStr(c.Array[3].Type) {
+		return c.GenErrResponse("invalid arg type for set")
+	}
+	option := c.Array[3].Bulk
+
+	if !IsBulkStr(c.Array[4].Type) {
+		return c.GenErrResponse("invalid arg type for set")
+	}
+	expire, _ := strconv.Atoi(string(c.Array[4].Bulk))
+	switch strings.ToLower(string(option)) {
+	case "ex":
+		expire *= 1000
+	case "px":
+	}
+
+	memMu.Lock()
+	mem[string(key)] = RedisMemValue{value: string(value), expireAt: now.Add(time.Millisecond * time.Duration(expire))}
+	memMu.Unlock()
+
+	return c.GenOkResponse()
+}
+
+func (c *Command) Get() Response {
+	now := time.Now()
+	if len(c.Array) != 2 || !IsBulkStr(c.Array[1].Type) {
+		return c.GenErrResponse("invalid arg num for get")
+	}
+	memMu.RLock()
+	v, exists := mem[string(c.Array[1].Bulk)]
+	memMu.RUnlock()
+	var res Response
+	res.Type = '$'
+	if !exists {
+		res.Bulk = nil
+	} else {
+		if !v.expireAt.IsZero() && v.expireAt.Before(now) {
+			res.Bulk = nil
+		} else {
+			res.Bulk = BulkString(v.value)
+		}
+	}
+	return res
+}
+
 func (c *Command) Process() Response {
-	res := Response{}
 	if c.Type != '*' {
-		res.Type = '-'
-		res.Err = "request must be arr"
-		return res
+		return c.GenErrResponse("request must be arr")
 	}
 	if len(c.Array) == 0 {
 		return Response(*c)
@@ -61,50 +153,21 @@ func (c *Command) Process() Response {
 
 	command := c.Array[0]
 	if command.Type != '$' {
-		res.Type = '-'
-		res.Err = "command must be bulk string"
-		return res
+		return c.GenErrResponse("command must be bulk string")
 	}
 
 	switch strings.ToLower(string(command.Bulk)) {
 	case "ping":
-		res.Type = '+'
-		res.SimpStr = "PONG"
+		return c.Ping()
 	case "echo":
-		if len(c.Array) != 2 {
-			res.Type = '-'
-			res.Err = "invalid arg num for echo"
-		} else {
-			res = Response(c.Array[1])
-		}
+		return c.Echo()
 	case "set":
-		if len(c.Array) != 3 || (!IsBulkStr(c.Array[1].Type) || !IsBulkStr(c.Array[2].Type)) {
-			res.Type = '-'
-			res.Err = "invalid arg num for set"
-		} else {
-			mem[string(c.Array[1].Bulk)] = string(c.Array[2].Bulk)
-			res.Type = '+'
-			res.SimpStr = "OK"
-		}
+		return c.Set()
 	case "get":
-		if len(c.Array) != 2 || !IsBulkStr(c.Array[1].Type) {
-			res.Type = '-'
-			res.Err = "invalid arg num for get"
-		} else {
-			v, exists := mem[string(c.Array[1].Bulk)]
-			res.Type = '$'
-			if !exists {
-				res.Bulk = BulkString(NilBulkStr)
-			} else {
-				res.Bulk = BulkString(v)
-			}
-		}
+		return c.Get()
 	default:
-		res.Type = '-'
-		res.Err = "unknown command"
+		return c.GenErrResponse("unknown command")
 	}
-
-	return res
 }
 
 func (b BulkString) WriteTo(w *bufio.Writer) error {

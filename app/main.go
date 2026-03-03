@@ -232,7 +232,7 @@ func (c *Command) Lpop(block bool) Response {
 }
 
 func (c *Command) Blpop() Response {
-	waitTime := 0
+	var waitTime float64
 	myNotify := make(chan struct{}, 1)
 	var timeoutCh <-chan time.Time
 
@@ -242,13 +242,14 @@ func (c *Command) Blpop() Response {
 	}
 
 	if len(c.Array) == 3 {
-		waitTime, err = strconv.Atoi(string(c.Array[2].Bulk))
+		strconv.ParseFloat(string(c.Array[2].Bulk), 64)
+		waitTime, err = strconv.ParseFloat(string(c.Array[2].Bulk), 64)
 		if err != nil || waitTime < 0 {
 			return c.GenErrResponse("lpop block just support time >= 0")
 		}
 	}
 	if waitTime > 0 {
-		timeoutCh = time.After(time.Duration(waitTime) * time.Second)
+		timeoutCh = time.After(time.Duration(waitTime * float64(time.Second)))
 	}
 	listMemMu.Lock()
 	rList := listMem[string(c.Array[1].Bulk)]
@@ -276,7 +277,7 @@ func (c *Command) Blpop() Response {
 			}
 			if len(rList.list) == 0 {
 				listMemMu.Unlock()
-				return Response{Type: '$', Bulk: nil}
+				return Response{Type: '*', Array: nil}
 			}
 		}
 	}

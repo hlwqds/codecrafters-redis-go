@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,12 +16,10 @@ import (
 
 // Ensures gofmt doesn't remove the "net" and "os" imports in stage 1 (feel free to remove this!)
 var (
-	_         = net.Listen
-	_         = os.Exit
-	mem       = map[string]RedisMemValue{}
-	memMu     sync.RWMutex
-	listMem   = map[string]*RedisList{}
-	listMemMu sync.RWMutex
+	_     = net.Listen
+	_     = os.Exit
+	mem   = map[string]RedisObject{}
+	memMu sync.RWMutex
 )
 
 type RedisList struct {
@@ -28,9 +27,10 @@ type RedisList struct {
 	list    []string
 }
 
-type RedisMemValue struct {
-	value    string
-	expireAt time.Time
+type RedisObject struct {
+	Type     ObjectType
+	Value    any
+	ExpireAt time.Time
 }
 
 const (
@@ -38,6 +38,11 @@ const (
 	MaxArrStackSize = 1024
 	NilBulkStr      = "$-1\r\n"
 	NilArr          = "*-1\r\n"
+)
+
+const (
+	TypeString = iota
+	TypeList
 )
 
 type (
@@ -48,6 +53,7 @@ type (
 	Response     RedisValue
 	RedisErr     string
 	RedisInt     int64
+	ObjectType   byte
 )
 
 func IsBulkStr(t byte) bool {
@@ -100,7 +106,7 @@ func (c *Command) Set() Response {
 	value := c.Array[2].Bulk
 	if len(c.Array) == 3 {
 		memMu.Lock()
-		mem[string(key)] = RedisMemValue{value: string(value)}
+		mem[string(key)] = RedisObject{Value: value, Type: TypeString}
 		memMu.Unlock()
 		return c.GenOkResponse()
 	}
@@ -121,7 +127,7 @@ func (c *Command) Set() Response {
 	}
 
 	memMu.Lock()
-	mem[string(key)] = RedisMemValue{value: string(value), expireAt: now.Add(time.Millisecond * time.Duration(expire))}
+	mem[string(key)] = RedisObject{Type: TypeString, Value: value, ExpireAt: now.Add(time.Millisecond * time.Duration(expire))}
 	memMu.Unlock()
 
 	return c.GenOkResponse()
@@ -140,10 +146,17 @@ func (c *Command) Get() Response {
 	if !exists {
 		res.Bulk = nil
 	} else {
-		if !v.expireAt.IsZero() && v.expireAt.Before(now) {
+		if v.Type != TypeString {
+			return c.GenErrResponse("innter error: type not match")
+		}
+		if !v.ExpireAt.IsZero() && v.ExpireAt.Before(now) {
 			res.Bulk = nil
 		} else {
-			res.Bulk = BulkString(v.value)
+			value, ok := v.Value.(BulkString)
+			if !ok {
+				return c.GenErrResponse("innter error: type not match")
+			}
+			res.Bulk = value
 		}
 	}
 	return res
@@ -154,18 +167,38 @@ func (c *Command) GenerateNumResponse(num int64) Response {
 }
 
 func (c *Command) Push(right bool) Response {
+	var rList *RedisList
+
 	if len(c.Array) < 3 {
 		return c.GenErrResponse("invalid arg num for lpush")
 	}
-	listMemMu.Lock()
-	rList := listMem[string(c.Array[1].Bulk)]
-	if rList == nil {
+	memMu.Lock()
+	obj, exists := mem[string(c.Array[1].Bulk)]
+	if !exists {
 		rList = &RedisList{}
+	} else {
+		if obj.Type != TypeList {
+			fmt.Println("here error 1")
+			return c.GenErrResponse("type not match")
+		}
+
+		if obj.Value == nil {
+			rList = &RedisList{}
+		} else {
+			var ok bool
+			rList, ok = obj.Value.(*RedisList)
+			if !ok {
+				fmt.Println("here error 2")
+				fmt.Println(reflect.TypeOf(obj.Value))
+				return c.GenErrResponse("inner error: type not match")
+			}
+		}
 	}
+
 	list := rList.list
 	for i := 2; i < len(c.Array); i++ {
 		if !IsBulkStr(c.Array[i].Type) {
-			listMemMu.Unlock()
+			memMu.Unlock()
 			return c.GenErrResponse("arg type invalid")
 		}
 		if right {
@@ -175,7 +208,9 @@ func (c *Command) Push(right bool) Response {
 		}
 	}
 	rList.list = list
-	listMem[string(c.Array[1].Bulk)] = rList
+	obj.Type = TypeList
+	obj.Value = rList
+	mem[string(c.Array[1].Bulk)] = obj
 	length := len(list)
 	wakeNum := min(len(rList.waiters), length)
 	for wakeNum > 0 {
@@ -183,7 +218,7 @@ func (c *Command) Push(right bool) Response {
 		rList.waiters = rList.waiters[1:]
 		wakeNum--
 	}
-	listMemMu.Unlock()
+	memMu.Unlock()
 	return c.GenerateNumResponse(int64(length))
 }
 
@@ -200,10 +235,26 @@ func (c *Command) Lpop(block bool) Response {
 		}
 		popNum = num
 	}
-	listMemMu.Lock()
-	rList := listMem[string(c.Array[1].Bulk)]
+	memMu.Lock()
+	obj, exists := mem[string(c.Array[1].Bulk)]
+	if !exists {
+		return Response{Type: '$', Bulk: nil}
+	}
+
+	if obj.Type != TypeList {
+		return c.GenErrResponse("type not match")
+	}
+
+	if obj.Value == nil {
+		return Response{Type: '$', Bulk: nil}
+	}
+	rList, ok := obj.Value.(*RedisList)
+	if !ok {
+		return c.GenErrResponse("inner error: type not match")
+	}
+
 	if rList == nil || len(rList.list) == 0 {
-		listMemMu.Unlock()
+		memMu.Unlock()
 		return Response{Type: '$', Bulk: nil}
 	}
 
@@ -212,8 +263,10 @@ func (c *Command) Lpop(block bool) Response {
 		popNum = len(list)
 	}
 	rList.list = list[popNum:]
-	listMem[string(c.Array[1].Bulk)] = rList
-	listMemMu.Unlock()
+	obj.Type = TypeList
+	obj.Value = rList
+	mem[string(c.Array[1].Bulk)] = obj
+	memMu.Unlock()
 
 	if popNum == 1 {
 		return Response{Type: '$', Bulk: []byte(list[0])}
@@ -233,6 +286,7 @@ func (c *Command) Lpop(block bool) Response {
 
 func (c *Command) Blpop() Response {
 	var waitTime float64
+	var rList *RedisList
 	myNotify := make(chan struct{}, 1)
 	var timeoutCh <-chan time.Time
 
@@ -251,20 +305,31 @@ func (c *Command) Blpop() Response {
 	if waitTime > 0 {
 		timeoutCh = time.After(time.Duration(waitTime * float64(time.Second)))
 	}
-	listMemMu.Lock()
-	rList := listMem[string(c.Array[1].Bulk)]
-	for rList == nil || len(rList.list) == 0 {
-		if rList == nil {
-			rList = &RedisList{}
-			listMem[string(c.Array[1].Bulk)] = rList
+	memMu.Lock()
+	obj, exists := mem[string(c.Array[1].Bulk)]
+	if !exists {
+		rList = &RedisList{}
+		obj.Type = TypeList
+		obj.Value = rList
+		mem[string(c.Array[1].Bulk)] = obj
+	} else {
+		var ok bool
+		if obj.Type != TypeList {
+			return c.GenErrResponse("type not match")
 		}
+		rList, ok = obj.Value.(*RedisList)
+		if !ok {
+			return c.GenErrResponse("inner error: type not match")
+		}
+	}
+	for len(rList.list) == 0 {
 		rList.waiters = append(rList.waiters, myNotify)
-		listMemMu.Unlock()
+		memMu.Unlock()
 		select {
 		case <-myNotify:
-			listMemMu.Lock()
+			memMu.Lock()
 		case <-timeoutCh:
-			listMemMu.Lock()
+			memMu.Lock()
 			if len(myNotify) > 0 {
 				<-myNotify
 			} else {
@@ -276,17 +341,18 @@ func (c *Command) Blpop() Response {
 				}
 			}
 			if len(rList.list) == 0 {
-				listMemMu.Unlock()
+				memMu.Unlock()
 				return Response{Type: '*', Array: nil}
 			}
 		}
 	}
 
 	list := rList.list
-
 	rList.list = list[1:]
-	listMem[string(c.Array[1].Bulk)] = rList
-	listMemMu.Unlock()
+	obj.Type = TypeList
+	obj.Value = rList
+	mem[string(c.Array[1].Bulk)] = obj
+	memMu.Unlock()
 
 	res := Response{}
 	res.Type = '*'
@@ -308,13 +374,43 @@ func (c *Command) Llen() Response {
 		return c.GenErrResponse("invalid arg num for llen")
 	}
 	length := 0
-	listMemMu.RLock()
-	rList := listMem[string(c.Array[1].Bulk)]
-	if rList != nil {
+	memMu.RLock()
+	obj, exists := mem[string(c.Array[1].Bulk)]
+
+	if exists && obj.Value != nil {
+		if obj.Type != TypeList {
+			memMu.RUnlock()
+			return c.GenErrResponse("type not match")
+		}
+		rList, ok := obj.Value.(*RedisList)
+		if !ok {
+			memMu.RUnlock()
+			return c.GenErrResponse("inner error: type not match")
+		}
 		length = len(rList.list)
 	}
-	listMemMu.RUnlock()
+	memMu.RUnlock()
 	return c.GenerateNumResponse(int64(length))
+}
+
+func (c *Command) RedisType() Response {
+	if len(c.Array) != 2 {
+		return c.GenErrResponse("invalid arg num for llen")
+	}
+	response := Response{Type: '+', SimpStr: SimpleString("none")}
+	memMu.RLock()
+	obj, exists := mem[string(c.Array[1].Bulk)]
+
+	if exists && obj.Value != nil {
+		switch obj.Type {
+		case TypeList:
+			response.SimpStr = SimpleString("list")
+		case TypeString:
+			response.SimpStr = SimpleString("string")
+		}
+	}
+	memMu.RUnlock()
+	return response
 }
 
 func (c *Command) Lrange() Response {
@@ -332,14 +428,24 @@ func (c *Command) Lrange() Response {
 	res := Response{}
 	res.Type = '*'
 	res.Array = RedisArray{}
-	listMemMu.RLock()
-	rList := listMem[string(c.Array[1].Bulk)]
+	memMu.RLock()
+	obj, exists := mem[string(c.Array[1].Bulk)]
 	length := 0
 	list := []string{}
-	if rList != nil {
+	if exists && obj.Value != nil {
+		if obj.Type != TypeList {
+			memMu.RUnlock()
+			return c.GenErrResponse("type not match")
+		}
+		rList, ok := obj.Value.(*RedisList)
+		if !ok {
+			memMu.RUnlock()
+			return c.GenErrResponse("inner error: type not match")
+		}
 		length = len(rList.list)
 		list = rList.list
 	}
+
 	if left < -length {
 		left = 0
 	}
@@ -363,7 +469,7 @@ func (c *Command) Lrange() Response {
 		res.Array = append(res.Array, tmp)
 		left++
 	}
-	listMemMu.RUnlock()
+	memMu.RUnlock()
 	return res
 }
 
@@ -401,6 +507,8 @@ func (c *Command) Process() Response {
 		return c.Lpop(false)
 	case "blpop":
 		return c.Blpop()
+	case "type":
+		return c.RedisType()
 	default:
 		return c.GenErrResponse("unknown command")
 	}

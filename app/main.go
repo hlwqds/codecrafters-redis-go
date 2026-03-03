@@ -19,9 +19,14 @@ var (
 	_         = os.Exit
 	mem       = map[string]RedisMemValue{}
 	memMu     sync.RWMutex
-	listMem   = map[string][]string{}
+	listMem   = map[string]*RedisList{}
 	listMemMu sync.RWMutex
 )
+
+type RedisList struct {
+	waiters []chan struct{}
+	list    []string
+}
 
 type RedisMemValue struct {
 	value    string
@@ -153,7 +158,11 @@ func (c *Command) Push(right bool) Response {
 		return c.GenErrResponse("invalid arg num for lpush")
 	}
 	listMemMu.Lock()
-	list := listMem[string(c.Array[1].Bulk)]
+	rList := listMem[string(c.Array[1].Bulk)]
+	if rList == nil {
+		rList = &RedisList{}
+	}
+	list := rList.list
 	for i := 2; i < len(c.Array); i++ {
 		if !IsBulkStr(c.Array[i].Type) {
 			listMemMu.Unlock()
@@ -165,35 +174,45 @@ func (c *Command) Push(right bool) Response {
 			list = append([]string{string(c.Array[i].Bulk)}, list...)
 		}
 	}
-	listMem[string(c.Array[1].Bulk)] = list
+	rList.list = list
+	listMem[string(c.Array[1].Bulk)] = rList
 	length := len(list)
+	wakeNum := min(len(rList.waiters), length)
+	for wakeNum > 0 {
+		rList.waiters[0] <- struct{}{}
+		rList.waiters = rList.waiters[1:]
+		wakeNum--
+	}
 	listMemMu.Unlock()
 	return c.GenerateNumResponse(int64(length))
 }
 
-func (c *Command) Lpop() Response {
+func (c *Command) Lpop(block bool) Response {
 	popNum := 1
 	if len(c.Array) != 2 && len(c.Array) != 3 {
 		return c.GenErrResponse("invalid arg num for lpop")
 	}
-	listMemMu.Lock()
-	list := listMem[string(c.Array[1].Bulk)]
-	if len(list) == 0 {
-		listMemMu.Unlock()
-		return Response{Type: '$', Bulk: nil}
-	}
+
 	if len(c.Array) == 3 {
 		num, err := strconv.Atoi(string(c.Array[2].Bulk))
 		if err != nil || num <= 0 {
-			listMemMu.Unlock()
 			return c.GenErrResponse("lpop just support num > 0")
 		}
 		popNum = num
 	}
+	listMemMu.Lock()
+	rList := listMem[string(c.Array[1].Bulk)]
+	if rList == nil || len(rList.list) == 0 {
+		listMemMu.Unlock()
+		return Response{Type: '$', Bulk: nil}
+	}
+
+	list := rList.list
 	if popNum > len(list) {
 		popNum = len(list)
 	}
-	listMem[string(c.Array[1].Bulk)] = list[popNum:]
+	rList.list = list[popNum:]
+	listMem[string(c.Array[1].Bulk)] = rList
 	listMemMu.Unlock()
 
 	if popNum == 1 {
@@ -212,13 +231,87 @@ func (c *Command) Lpop() Response {
 	return res
 }
 
+func (c *Command) Blpop() Response {
+	waitTime := 0
+	myNotify := make(chan struct{}, 1)
+	var timeoutCh <-chan time.Time
+
+	var err error
+	if len(c.Array) != 3 {
+		return c.GenErrResponse("invalid arg num for lpop")
+	}
+
+	if len(c.Array) == 3 {
+		waitTime, err = strconv.Atoi(string(c.Array[2].Bulk))
+		if err != nil || waitTime < 0 {
+			return c.GenErrResponse("lpop block just support time >= 0")
+		}
+	}
+	if waitTime > 0 {
+		timeoutCh = time.After(time.Duration(waitTime) * time.Second)
+	}
+	listMemMu.Lock()
+	rList := listMem[string(c.Array[1].Bulk)]
+	for rList == nil || len(rList.list) == 0 {
+		if rList == nil {
+			rList = &RedisList{}
+			listMem[string(c.Array[1].Bulk)] = rList
+		}
+		rList.waiters = append(rList.waiters, myNotify)
+		listMemMu.Unlock()
+		select {
+		case <-myNotify:
+			listMemMu.Lock()
+		case <-timeoutCh:
+			listMemMu.Lock()
+			if len(myNotify) > 0 {
+				<-myNotify
+			} else {
+				for i, waiter := range rList.waiters {
+					if waiter == myNotify {
+						rList.waiters = append(rList.waiters[:i], rList.waiters[i+1:]...)
+						break
+					}
+				}
+			}
+			if len(rList.list) == 0 {
+				listMemMu.Unlock()
+				return Response{Type: '$', Bulk: nil}
+			}
+		}
+	}
+
+	list := rList.list
+
+	rList.list = list[1:]
+	listMem[string(c.Array[1].Bulk)] = rList
+	listMemMu.Unlock()
+
+	res := Response{}
+	res.Type = '*'
+	res.Array = RedisArray{}
+
+	tmp := RedisValue{}
+	tmp.Type = '$'
+	tmp.Bulk = []byte(c.Array[1].Bulk)
+	res.Array = append(res.Array, tmp)
+
+	tmp.Type = '$'
+	tmp.Bulk = []byte(list[0])
+	res.Array = append(res.Array, tmp)
+	return res
+}
+
 func (c *Command) Llen() Response {
 	if len(c.Array) != 2 {
 		return c.GenErrResponse("invalid arg num for llen")
 	}
+	length := 0
 	listMemMu.RLock()
-	list := listMem[string(c.Array[1].Bulk)]
-	length := len(list)
+	rList := listMem[string(c.Array[1].Bulk)]
+	if rList != nil {
+		length = len(rList.list)
+	}
 	listMemMu.RUnlock()
 	return c.GenerateNumResponse(int64(length))
 }
@@ -239,8 +332,13 @@ func (c *Command) Lrange() Response {
 	res.Type = '*'
 	res.Array = RedisArray{}
 	listMemMu.RLock()
-	list := listMem[string(c.Array[1].Bulk)]
-	length := len(list)
+	rList := listMem[string(c.Array[1].Bulk)]
+	length := 0
+	list := []string{}
+	if rList != nil {
+		length = len(rList.list)
+		list = rList.list
+	}
 	if left < -length {
 		left = 0
 	}
@@ -299,7 +397,9 @@ func (c *Command) Process() Response {
 	case "llen":
 		return c.Llen()
 	case "lpop":
-		return c.Lpop()
+		return c.Lpop(false)
+	case "blpop":
+		return c.Blpop()
 	default:
 		return c.GenErrResponse("unknown command")
 	}

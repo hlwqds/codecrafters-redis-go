@@ -244,8 +244,9 @@ func (c *Command) Lrange() Response {
 }
 
 type RedisStreamEntry struct {
-	table map[string]string
-	id    string
+	table     map[string]string
+	timestamp int64
+	seq       int64
 }
 
 type RedisStream struct {
@@ -258,21 +259,31 @@ func (c *Command) Xadd() Response {
 	if len(c.Array) < 5 || len(c.Array)%2 != 1 {
 		return c.GenErrResponse("invalid arg num for xadd")
 	}
+
+	if !IsBulkStr(c.Array[2].Type) {
+		return c.GenErrResponse("arg type invalid")
+	}
+
+	idMember := strings.Split(string(c.Array[2].Bulk), "-")
+	timestamp, err := strconv.ParseInt(idMember[0], 10, 64)
+	if err != nil {
+		return c.GenErrResponse("invalid id for xadd")
+	}
+
+	seq, err := strconv.ParseInt(idMember[1], 10, 64)
+	if err != nil {
+		return c.GenErrResponse("invalid id for xadd")
+	}
 	num := (len(c.Array) - 3) / 2
 	streamEntry := RedisStreamEntry{}
 	streamEntry.table = make(map[string]string, num)
 	memMu.Lock()
 	obj, exists := mem[string(c.Array[1].Bulk)]
-	if !IsBulkStr(c.Array[2].Type) {
-		memMu.Unlock()
-		return c.GenErrResponse("arg type invalid")
-	}
-
 	if !exists {
 		rStream = &RedisStream{}
 	} else {
-		if obj.Type != TypeList {
-			fmt.Println("here error 1")
+		if obj.Type != TypeStream {
+			memMu.Unlock()
 			return c.GenErrResponse("type not match")
 		}
 
@@ -282,12 +293,21 @@ func (c *Command) Xadd() Response {
 			var ok bool
 			rStream, ok = obj.Value.(*RedisStream)
 			if !ok {
+				memMu.Unlock()
 				return c.GenErrResponse("inner error: type not match")
 			}
 		}
 	}
 
 	list := rStream.list
+	if len(list) != 0 {
+		lastEntry := list[len(list)-1]
+		if timestamp < lastEntry.timestamp || (timestamp == lastEntry.timestamp && seq <= lastEntry.seq) {
+			memMu.Unlock()
+			return c.GenErrResponse("id is smaller than last entry")
+		}
+	}
+
 	for i := 3; i < len(c.Array); i += 2 {
 		if !IsBulkStr(c.Array[i].Type) {
 			memMu.Unlock()
@@ -299,7 +319,8 @@ func (c *Command) Xadd() Response {
 		}
 		streamEntry.table[string(c.Array[i].Bulk)] = string(c.Array[i+1].Bulk)
 	}
-	streamEntry.id = string(c.Array[2].Bulk)
+	streamEntry.timestamp = timestamp
+	streamEntry.seq = seq
 	list = append(list, streamEntry)
 	rStream.list = list
 	obj.Type = TypeStream

@@ -320,6 +320,12 @@ func (c *Command) Xadd() Response {
 	list := rStream.list
 
 	if timestampAuto {
+		timestamp = uint64(time.Now().UnixMilli())
+		if len(list) == 0 {
+			seq = 0
+		} else if timestamp == list[len(list)-1].timestamp {
+			seq = list[len(list)-1].seq + 1
+		}
 	} else if seqAuto {
 		if len(list) == 0 {
 			seq = 0

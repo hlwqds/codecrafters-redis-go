@@ -274,6 +274,9 @@ func (c *Command) Xadd() Response {
 	if err != nil {
 		return c.GenErrResponse("invalid id for xadd")
 	}
+	if timestamp < 0 || seq < 0 || (timestamp == 0 && seq == 0) {
+		return c.GenErrResponse("ERR The ID specified in XADD must be greater than 0-0")
+	}
 	num := (len(c.Array) - 3) / 2
 	streamEntry := RedisStreamEntry{}
 	streamEntry.table = make(map[string]string, num)
@@ -304,7 +307,7 @@ func (c *Command) Xadd() Response {
 		lastEntry := list[len(list)-1]
 		if timestamp < lastEntry.timestamp || (timestamp == lastEntry.timestamp && seq <= lastEntry.seq) {
 			memMu.Unlock()
-			return c.GenErrResponse("id is smaller than last entry")
+			return c.GenErrResponse("ERR The ID specified in XADD is equal or smaller than the target stream top item")
 		}
 	}
 

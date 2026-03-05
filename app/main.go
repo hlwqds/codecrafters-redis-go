@@ -245,8 +245,8 @@ func (c *Command) Lrange() Response {
 
 type RedisStreamEntry struct {
 	table     map[string]string
-	timestamp int64
-	seq       int64
+	timestamp uint64
+	seq       uint64
 }
 
 type RedisStream struct {
@@ -254,7 +254,12 @@ type RedisStream struct {
 }
 
 func (c *Command) Xadd() Response {
+	var err error
+	var timestamp uint64
+	var seq uint64
 	var rStream *RedisStream
+	timestampAuto := false
+	seqAuto := false
 
 	if len(c.Array) < 5 || len(c.Array)%2 != 1 {
 		return c.GenErrResponse("invalid arg num for xadd")
@@ -265,18 +270,29 @@ func (c *Command) Xadd() Response {
 	}
 
 	idMember := strings.Split(string(c.Array[2].Bulk), "-")
-	timestamp, err := strconv.ParseInt(idMember[0], 10, 64)
-	if err != nil {
-		return c.GenErrResponse("invalid id for xadd")
+	if idMember[0] == "*" {
+		timestampAuto = true
+	} else if idMember[1] == "*" {
+		seqAuto = true
+		timestamp, err = strconv.ParseUint(idMember[0], 10, 64)
+		if err != nil {
+			return c.GenErrResponse("invalid id for xadd")
+		}
+	} else {
+		timestamp, err = strconv.ParseUint(idMember[0], 10, 64)
+		if err != nil {
+			return c.GenErrResponse("invalid id for xadd")
+		}
+
+		seq, err = strconv.ParseUint(idMember[1], 10, 64)
+		if err != nil {
+			return c.GenErrResponse("invalid id for xadd")
+		}
+		if timestamp == 0 && seq == 0 {
+			return c.GenErrResponse("ERR The ID specified in XADD must be greater than 0-0")
+		}
 	}
 
-	seq, err := strconv.ParseInt(idMember[1], 10, 64)
-	if err != nil {
-		return c.GenErrResponse("invalid id for xadd")
-	}
-	if timestamp < 0 || seq < 0 || (timestamp == 0 && seq == 0) {
-		return c.GenErrResponse("ERR The ID specified in XADD must be greater than 0-0")
-	}
 	num := (len(c.Array) - 3) / 2
 	streamEntry := RedisStreamEntry{}
 	streamEntry.table = make(map[string]string, num)
@@ -301,13 +317,26 @@ func (c *Command) Xadd() Response {
 			}
 		}
 	}
-
 	list := rStream.list
-	if len(list) != 0 {
-		lastEntry := list[len(list)-1]
-		if timestamp < lastEntry.timestamp || (timestamp == lastEntry.timestamp && seq <= lastEntry.seq) {
-			memMu.Unlock()
-			return c.GenErrResponse("ERR The ID specified in XADD is equal or smaller than the target stream top item")
+
+	if timestampAuto {
+	} else if seqAuto {
+		if len(list) == 0 {
+			seq = 0
+		} else if timestamp == list[len(list)-1].timestamp {
+			seq = list[len(list)-1].seq + 1
+		}
+		if timestamp == 0 && seq == 0 {
+			seq = 1
+		}
+	} else {
+		if len(list) != 0 {
+			lastEntry := list[len(list)-1]
+
+			if timestamp < lastEntry.timestamp || (timestamp == lastEntry.timestamp && seq <= lastEntry.seq) {
+				memMu.Unlock()
+				return c.GenErrResponse("ERR The ID specified in XADD is equal or smaller than the target stream top item")
+			}
 		}
 	}
 
@@ -330,7 +359,13 @@ func (c *Command) Xadd() Response {
 	obj.Value = rStream
 	mem[string(c.Array[1].Bulk)] = obj
 	memMu.Unlock()
-	return Response{Type: '$', Bulk: c.Array[2].Bulk}
+	builder := strings.Builder{}
+	builder.Grow(41)
+	builder.WriteString(strconv.FormatUint(timestamp, 10))
+	builder.WriteByte('-')
+	builder.WriteString(strconv.FormatUint(seq, 10))
+
+	return Response{Type: '$', Bulk: BulkString(builder.String())}
 }
 
 func (c *Command) Process() Response {
